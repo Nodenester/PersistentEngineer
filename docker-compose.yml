@@ -1,0 +1,161 @@
+version: '3.8'
+
+# =============================================================================
+# Persistent Engineer Agent - Docker Compose (Linux)
+# =============================================================================
+# Starts the complete Persistent Engineer stack:
+# - Redis (message queue)
+# - Agent container (persistent AI employee)
+# =============================================================================
+
+services:
+  # ---------------------------------------------------------------------------
+  # Redis - Message Queue
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: persistent-engineer-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - agent-network
+
+  # ---------------------------------------------------------------------------
+  # SQL Server - Database for testing
+  # ---------------------------------------------------------------------------
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: persistent-engineer-sqlserver
+    environment:
+      - ACCEPT_EULA=Y
+      - MSSQL_SA_PASSWORD=${MSSQL_SA_PASSWORD:-YourStrong@Passw0rd}
+      - MSSQL_PID=Developer
+    ports:
+      - "1433:1433"
+    volumes:
+      - sqlserver-data:/var/opt/mssql
+      - sqlserver-backups:/var/opt/mssql/backup
+    healthcheck:
+      test: /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P "$$MSSQL_SA_PASSWORD" -C -Q "SELECT 1" || exit 1
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    restart: unless-stopped
+    networks:
+      - agent-network
+
+  # ---------------------------------------------------------------------------
+  # Persistent Engineer Agent
+  # ---------------------------------------------------------------------------
+  agent:
+    build:
+      context: .
+      dockerfile: Dockerfile.linux
+    container_name: persistent-engineer-agent
+    hostname: agent
+    environment:
+      # Agent identification (must match container name suffix after "persistent-engineer-")
+      - AGENT_ID=${AGENT_ID:-agent}
+
+      # Redis connection
+      - REDIS_URL=redis://redis:6379
+
+      # Anthropic API (optional if mounting ~/.claude with credentials)
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+
+      # GitHub token (optional, for repo operations)
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+
+      # Display settings
+      - DISPLAY=:0
+      - VNC_RESOLUTION=1920x1080x24
+      - VNC_PASSWORD=${VNC_PASSWORD:-agentpwd}
+
+      # Workspace settings
+      - WORKSPACE_ROOT=/workspace
+      - PROJECTS_DIR=/workspace/projects
+      - STATE_DIR=/workspace/.state
+      - CREDS_DIR=/workspace/.creds
+      - MEMORY_DIR=/workspace/.agent-memory
+
+      # Claude Code settings (for long-running loops)
+      - MAX_CODING_ITERATIONS=${MAX_CODING_ITERATIONS:-500}
+      - MAX_BUILD_ATTEMPTS=${MAX_BUILD_ATTEMPTS:-10}
+
+      # SQL Server connection
+      - SQLSERVER_HOST=sqlserver
+      - SQLSERVER_PORT=1433
+      - SQLSERVER_USER=sa
+      - SQLSERVER_PASSWORD=${MSSQL_SA_PASSWORD:-YourStrong@Passw0rd}
+      - CONNECTION_STRING=Server=sqlserver,1433;User Id=sa;Password=${MSSQL_SA_PASSWORD:-YourStrong@Passw0rd};TrustServerCertificate=True;
+    ports:
+      # VNC direct access
+      - "5900:5900"
+      # noVNC web access
+      - "6080:6080"
+      # Health check
+      - "8080:8080"
+    volumes:
+      # Persistent workspace volume
+      - workspace-data:/workspace
+
+      # Mount Claude credentials from parent (read-only source for refresh)
+      # The entrypoint script copies these to /home/agent/.claude at startup
+      # and daemon.py re-copies them when OAuth tokens expire
+      - ${HOME}/.claude:/claude-credentials:ro
+
+      # Optional: Mount SSH keys for git
+      # - ${HOME}/.ssh:/home/agent/.ssh:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+      sqlserver:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+    networks:
+      - agent-network
+    # Allow the agent to have enough resources
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 8G
+        reservations:
+          cpus: '2'
+          memory: 4G
+
+# =============================================================================
+# Volumes
+# =============================================================================
+volumes:
+  redis-data:
+    driver: local
+  workspace-data:
+    driver: local
+  sqlserver-data:
+    driver: local
+  sqlserver-backups:
+    driver: local
+
+# =============================================================================
+# Networks
+# =============================================================================
+networks:
+  agent-network:
+    driver: bridge
